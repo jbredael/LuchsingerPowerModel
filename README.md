@@ -2,6 +2,8 @@
 
 A simple, configurable power model for pumping kite airborne wind energy (AWE) systems based on the Luchsinger model.
 
+It takes an awesIO system YAML file and a simulation settings YAML file as input.
+
 ## Overview
 
 This repository provides a standalone power model for AWE pumping kite systems. It calculates power curves from cut-in to cut-out wind speed, accounting for:

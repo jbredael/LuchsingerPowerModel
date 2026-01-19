@@ -50,14 +50,23 @@ class PowerModel:
             config: Dictionary containing model parameters (legacy format)
                 or awesIO system configuration.
             simulation_settings: Optional simulation settings dictionary
-                for awesIO format configs.
+                for awesIO format configs. If None, default values will be used.
 
         Raises:
             ValueError: If required configuration keys are missing.
             ValueError: If parameter values are physically invalid.
         """
         self.config = config
-        self.simulation_settings = simulation_settings
+        
+        # Use default simulation settings if none provided
+        if simulation_settings is None:
+            logger.warning(
+                "No simulation settings provided. Using default values: "
+                f"{self._get_default_simulation_settings()}"
+            )
+            self.simulation_settings = self._get_default_simulation_settings()
+        else:
+            self.simulation_settings = simulation_settings
 
         # Extract parameters (handles both legacy and awesIO formats)
         self._extract_parameters()
@@ -95,6 +104,26 @@ class PowerModel:
         if self.cutInWindSpeed >= self.cutOutWindSpeed:
             raise ValueError("Cut-in wind speed must be less than cut-out")
 
+    @staticmethod
+    def _get_default_simulation_settings() -> Dict[str, Any]:
+        """Get default simulation settings.
+        
+        Returns:
+            Dictionary with default operational and atmosphere parameters.
+        """
+        return {
+            'operational': {
+                'cut_in_wind_speed_m_s': 4.0,
+                'cut_out_wind_speed_m_s': 25.0,
+                'elevation_angle_out_deg': 30.0,
+                'elevation_angle_in_deg': 45.0,
+                'minimum_tether_length_m': 100.0,
+            },
+            'atmosphere': {
+                'air_density_kg_m3': 1.225,
+            }
+        }
+
     def _extract_parameters(self) -> None:
         """Extract parameters directly from awesIO format config."""
         components = self.config.get('components', {})
@@ -108,8 +137,6 @@ class PowerModel:
         self.cutOutWindSpeed = operational.get('cut_out_wind_speed_m_s')
         self.elevationAngleOut = np.radians(operational.get('elevation_angle_out_deg'))
         self.elevationAngleIn = np.radians(operational.get('elevation_angle_in_deg'))
-        self.reelOutSpeedLimit = operational.get('max_reel_out_speed_m_s')
-        self.reelInSpeedLimit = operational.get('max_reel_in_speed_m_s')
         self.tetherMinLength = operational.get('minimum_tether_length_m')
 
         # Extract atmosphere parameters
@@ -136,7 +163,8 @@ class PowerModel:
         drum = ground_station.get('drum', {})
         generator = ground_station.get('generator', {})
         storage = ground_station.get('storage', {})
-        
+        self.reelOutSpeedLimit = drum.get('max_tether_speed_m_s')
+        self.reelInSpeedLimit = drum.get('max_tether_speed_m_s')
         self.nominalTetherForce = drum.get('max_tether_force_n') or tether_structure.get('max_tether_force_n')
         self.nominalGeneratorPower = generator.get('rated_power_kw', 0) * 1000  # kW to W
         self.generatorEfficiency = generator.get('efficiency')
