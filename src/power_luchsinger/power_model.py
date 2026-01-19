@@ -2,7 +2,7 @@
 
 This module provides the main PowerModel class for calculating power output
 of pumping kite systems. The model is planet-agnostic and configurable via
-dictionaries or YAML files.
+dictionaries or YAML files. Supports both legacy format and awesIO format.
 
 References:
     [1] R.H. Luchsinger: "Pumping cycle kite power". Springer, 2013.
@@ -10,12 +10,15 @@ References:
 
 from typing import Dict, Any, Tuple
 from pathlib import Path
+from datetime import datetime
 import copy
 import logging
 
 import numpy as np
 import yaml
 from scipy import optimize as op
+
+from awesio.validator import validate as awesio_validate
 
 from src.power_luchsinger.calculations import (
     calculate_force_factor_out,
@@ -37,118 +40,26 @@ class PowerModel:
     configuration.
 
     The model implements the Luchsinger pumping cycle model [1].
-
-    Attributes:
-        config (Dict): Complete configuration dictionary.
-        wingArea (float): Projected wing area in m².
-        airDensity (float): Air density in kg/m³.
-        nominalTetherForce (float): Maximum tether force in N.
-        nominalGeneratorPower (float): Maximum generator power in W.
     """
 
-    # Path to default configuration file
-    _DEFAULT_CONFIG_PATH = Path(__file__).parent / 'default_config.yml'
 
-    # Required configuration sections
-    REQUIRED_SECTIONS = ['kite', 'tether', 'atmosphere', 'groundStation', 'operational']
-
-    # Required keys within each section
-    REQUIRED_KEYS = {
-        'kite': ['wingArea', 'liftCoefficientOut', 'dragCoefficientOut',
-                 'dragCoefficientIn'],
-        'tether': ['maxLength', 'minLength'],
-        'atmosphere': ['airDensity'],
-        'groundStation': ['nominalTetherForce', 'nominalGeneratorPower',
-                          'reelOutSpeedLimit', 'reelInSpeedLimit'],
-        'operational': ['cutInWindSpeed', 'cutOutWindSpeed',
-                        'elevationAngleOut', 'elevationAngleIn'],
-    }
-
-    @classmethod
-    def _load_default_config(cls) -> Dict[str, Any]:
-        """Load default configuration from YAML file.
-
-        Returns:
-            Dict: Default configuration dictionary.
-
-        Raises:
-            FileNotFoundError: If default config file doesn't exist.
-        """
-        if not cls._DEFAULT_CONFIG_PATH.exists():
-            raise FileNotFoundError(
-                f"Default configuration file not found: {cls._DEFAULT_CONFIG_PATH}"
-            )
-
-        with open(cls._DEFAULT_CONFIG_PATH, 'r') as f:
-            return yaml.safe_load(f)
-
-    @classmethod
-    def _merge_configs(cls, user_config: Dict[str, Any], default_config: Dict[str, Any]) -> Dict[str, Any]:
-        """Merge user configuration with defaults.
-
-        Args:
-            user_config (Dict): User-provided configuration.
-            default_config (Dict): Default configuration.
-
-        Returns:
-            Dict: Merged configuration with user values taking precedence.
-        """
-        merged = copy.deepcopy(default_config)
-        defaults_used = []
-
-        # Track which sections and keys are missing or None/empty from user config
-        for section, default_values in default_config.items():
-            if section not in user_config or user_config[section] is None:
-                # Entire section missing or None
-                if isinstance(default_values, dict):
-                    for key, value in default_values.items():
-                        defaults_used.append(f"{section}.{key} = {value}")
-                else:
-                    defaults_used.append(f"{section} = {default_values}")
-            elif isinstance(default_values, dict) and isinstance(user_config[section], dict):
-                # Section exists, check individual keys
-                for key, value in default_values.items():
-                    if key not in user_config[section] or user_config[section][key] is None:
-                        defaults_used.append(f"{section}.{key} = {value}")
-
-        # Merge user config into defaults
-        for section, values in user_config.items():
-            if section not in merged:
-                merged[section] = {}
-
-            if isinstance(values, dict):
-                for key, value in values.items():
-                    # Only use user value if it's not None
-                    if value is not None:
-                        merged[section][key] = value
-            elif values is not None:
-                merged[section] = values
-
-        # Print defaults used
-        if defaults_used:
-            print("\n=== Default values used for missing configuration parameters ===")
-            for default_info in defaults_used:
-                print(f"  {default_info}")
-            print("================================================================\n")
-
-        return merged
-
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any], simulation_settings: Dict[str, Any] = None):
         """Initialize power model with configuration parameters.
 
         Args:
-            config (Dict): Dictionary containing model parameters.
-                Missing values will be filled from default_config.yaml.
+            config: Dictionary containing model parameters (legacy format)
+                or awesIO system configuration.
+            simulation_settings: Optional simulation settings dictionary
+                for awesIO format configs.
 
         Raises:
             ValueError: If required configuration keys are missing.
             ValueError: If parameter values are physically invalid.
         """
-        # Load defaults and merge with user config
-        default_config = self._load_default_config()
-        self.config = self._merge_configs(config, default_config)
+        self.config = config
+        self.simulation_settings = simulation_settings
 
-        # Extract parameters first
+        # Extract parameters (handles both legacy and awesIO formats)
         self._extract_parameters()
 
         # Then validate physical constraints
@@ -185,40 +96,52 @@ class PowerModel:
             raise ValueError("Cut-in wind speed must be less than cut-out")
 
     def _extract_parameters(self) -> None:
-        """Extract parameters from config to instance variables."""
-        # Kite parameters
-        kite = self.config['kite']
-        self.wingArea = kite['wingArea']
-        self.liftCoefficientOut = kite['liftCoefficientOut']
-        self.dragCoefficientKiteOut = kite['dragCoefficientOut']
-        self.dragCoefficientKiteIn = kite['dragCoefficientIn']
+        """Extract parameters directly from awesIO format config."""
+        components = self.config.get('components', {})
 
-        # Tether parameters
-        tether = self.config['tether']
-        self.tetherMaxLength = tether['maxLength']
-        self.tetherMinLength = tether['minLength']
+        # Extract operational and atmosphere parameters from simulation settings
+        operational = self.simulation_settings.get('operational', {})
+        atmosphere = self.simulation_settings.get('atmosphere', {})
+        
+        # Extract operational parameters
+        self.cutInWindSpeed = operational.get('cut_in_wind_speed_m_s')
+        self.cutOutWindSpeed = operational.get('cut_out_wind_speed_m_s')
+        self.elevationAngleOut = np.radians(operational.get('elevation_angle_out_deg'))
+        self.elevationAngleIn = np.radians(operational.get('elevation_angle_in_deg'))
+        self.reelOutSpeedLimit = operational.get('max_reel_out_speed_m_s')
+        self.reelInSpeedLimit = operational.get('max_reel_in_speed_m_s')
+        self.tetherMinLength = operational.get('minimum_tether_length_m')
 
-        # Atmosphere parameters
-        atm = self.config['atmosphere']
-        self.airDensity = atm['airDensity']
+        # Extract atmosphere parameters
+        self.airDensity = atmosphere.get('air_density_kg_m3')
 
-        # Ground station parameters
-        gs = self.config['groundStation']
-        self.nominalTetherForce = gs['nominalTetherForce']
-        self.nominalGeneratorPower = gs['nominalGeneratorPower']
-        self.reelOutSpeedLimit = gs['reelOutSpeedLimit']
-        self.reelInSpeedLimit = gs['reelInSpeedLimit']
+        # Extract wing parameters
+        wing = components.get('wing', {})
+        wing_structure = wing.get('structure', {})
+        wing_aero = wing.get('aerodynamics', {}).get('simple_aero_model', {})
+        
+        self.wingArea = wing_structure.get('projected_surface_area_m2')
+        self.liftCoefficientOut = wing_aero.get('lift_coefficient_reel_out')
+        self.dragCoefficientKiteOut = wing_aero.get('drag_coefficient_reel_out')
+        self.dragCoefficientKiteIn = wing_aero.get('drag_coefficient_reel_in')
 
-        # Efficiency parameters (only two: generator and storage)
-        self.generatorEfficiency = gs.get('generatorEfficiency')
-        self.storageEfficiency = gs.get('storageEfficiency')
+        # Extract tether parameters
+        tether = components.get('tether', {})
+        tether_structure = tether.get('structure', {})       
+        self.tetherMaxLength = tether_structure.get('length_m')
 
-        # Operational parameters
-        operational = self.config['operational']
-        self.cutInWindSpeed = operational['cutInWindSpeed']
-        self.cutOutWindSpeed = operational['cutOutWindSpeed']
-        self.elevationAngleOut = np.radians(operational['elevationAngleOut'])
-        self.elevationAngleIn = np.radians(operational['elevationAngleIn'])
+
+        # Extract ground station parameters
+        ground_station = components.get('ground_station', {})
+        drum = ground_station.get('drum', {})
+        generator = ground_station.get('generator', {})
+        storage = ground_station.get('storage', {})
+        
+        self.nominalTetherForce = drum.get('max_tether_force_n') or tether_structure.get('max_tether_force_n')
+        self.nominalGeneratorPower = generator.get('rated_power_kw', 0) * 1000  # kW to W
+        self.generatorEfficiency = generator.get('efficiency')
+        self.storageEfficiency = storage.get('efficiency')
+
 
     def _compute_derived_parameters(self) -> None:
         """Compute derived parameters from base configuration."""
@@ -609,11 +532,23 @@ class PowerModel:
         }
 
     @classmethod
-    def from_yaml(cls, yamlPath: Path) -> 'PowerModel':
+    def from_yaml(
+        cls,
+        yamlPath: Path,
+        simulationSettingsPath: Path = None,
+        validate: bool = True
+    ) -> 'PowerModel':
         """Load configuration from YAML file and create model instance.
 
+        Supports both legacy format and awesIO format configuration files.
+        If the file is in awesIO format, it will be validated before use.
+
         Args:
-            yamlPath (Path): Path to YAML configuration file.
+            yamlPath: Path to system YAML configuration file.
+            simulationSettingsPath: Path to simulation settings YAML file
+                containing operational and atmosphere parameters.
+                Required for awesIO format system configs.
+            validate: Whether to validate awesIO format files. Defaults to True.
 
         Returns:
             PowerModel: Initialized power model instance.
@@ -621,6 +556,7 @@ class PowerModel:
         Raises:
             FileNotFoundError: If YAML file doesn't exist.
             ValueError: If YAML contains invalid configuration.
+            Exception: If awesIO validation fails.
         """
         yamlPath = Path(yamlPath)
 
@@ -630,5 +566,111 @@ class PowerModel:
         with open(yamlPath, 'r') as f:
             config = yaml.safe_load(f)
 
-        return cls(config)
+        # Load simulation settings if provided
+        simulation_settings = None
+        if simulationSettingsPath is not None:
+            simulationSettingsPath = Path(simulationSettingsPath)
+            if not simulationSettingsPath.exists():
+                raise FileNotFoundError(
+                    f"Simulation settings file not found: {simulationSettingsPath}"
+                )
+            with open(simulationSettingsPath, 'r') as f:
+                simulation_settings = yaml.safe_load(f)
+            print(f"Loaded simulation settings from: {simulationSettingsPath.name}")
 
+        # Validate using awesIO validator (if schema exists)
+        if validate:
+            try:
+                awesio_validate(
+                    input=yamlPath,
+                    restrictive=False,
+                    defaults=False,
+                )
+                print(f"  ✓ {yamlPath.name} validated against system_schema")
+            except FileNotFoundError:
+                print(f"  Note: system_schema not available, skipping validation")
+
+        # Create model with awesIO config and simulation settings
+        return cls(config, simulation_settings)
+
+    def export_power_curves_awesio(
+        self,
+        data: Dict[str, np.ndarray],
+        output_path: Path,
+        name: str = "Luchsinger Power Curves",
+        description: str = "Power curves for pumping ground-gen AWE system",
+        note: str = "Power curve data generated from Luchsinger model",
+        validate: bool = True,
+    ) -> None:
+        """Export power curve data in awesIO format.
+
+        Args:
+            data: Power curve data dictionary from generate_power_curve().
+            output_path: Path to save the output YAML file.
+            name: Name for the power curves dataset.
+            description: Description of the power curves.
+            note: Additional notes about the data.
+            validate: Whether to validate the output file. Defaults to True.
+        """
+        output_path = Path(output_path)
+
+        # Calculate operating altitude from tether length and elevation angle
+        operating_altitude = self.operationalLength * np.sin(self.elevationAngleOut)
+
+        # Number of wind speed points
+        numPoints = len(data['windSpeed'])
+
+        # Build awesIO format output
+        output = {
+            'metadata': {
+                'name': name,
+                'description': description,
+                'note': note,
+                'awesIO_version': '0.1.0',
+                'schema': 'power_curves_schema.yml',
+                'time_created': datetime.now().isoformat(),
+                'model_config': {
+                    'wing_area_m2': float(self.wingArea),
+                    'nominal_power_w': float(self.nominalGeneratorPower),
+                    'nominal_tether_force_n': float(self.nominalTetherForce),
+                    'cut_in_wind_speed_m_s': float(self.cutInWindSpeed),
+                    'cut_out_wind_speed_m_s': float(self.cutOutWindSpeed),
+                    'operating_altitude_m': float(operating_altitude),
+                    'tether_length_operational_m': float(self.operationalLength),
+                },
+            },
+            'altitudes_m': [float(operating_altitude)],  # Single altitude for this model
+            'reference_wind_speeds_m_s': [float(v) for v in data['windSpeed']],
+            'power_curves': [
+                {
+                    'profile_id': 1,
+                    'speed_ratio_at_operating_altitude': 1.0,
+                    'u_normalized': [1.0],  # Single altitude, normalized to 1
+                    'v_normalized': [0.0],  # No crosswind component
+                    'probability_weight': 1.0,
+                    'cycle_power_w': [float(p) for p in data['power']],
+                    'reel_out_power_w': [float(p) for p in data['reelOutPower']],
+                    'reel_in_power_w': [float(p) for p in data['reelInPower']],
+                    'reel_out_time_s': [float(t) for t in data['reelOutTime']],
+                    'reel_in_time_s': [float(t) for t in data['reelInTime']],
+                    'cycle_time_s': [
+                        float(t_out + t_in)
+                        for t_out, t_in in zip(data['reelOutTime'], data['reelInTime'])
+                    ],
+                },
+            ],
+        }
+
+        # Write output file
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, 'w') as f:
+            yaml.dump(output, f, default_flow_style=False, sort_keys=False)
+
+        # Validate output if requested
+        if validate:
+            awesio_validate(
+                input=output_path,
+                restrictive=False,
+                defaults=False,
+            )
+            print(f"  ✓ Output validated against power_curves_schema")

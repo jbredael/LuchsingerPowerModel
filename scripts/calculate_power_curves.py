@@ -1,7 +1,8 @@
 """Calculate and plot comprehensive power curve analysis for an AWE system.
 
-This script loads configuration from a YAML file, calculates the power curve
-from cut-in to cut-out wind speed, and creates a comprehensive visualization.
+This script loads configuration from an awesIO YAML file, validates it,
+calculates the power curve from cut-in to cut-out wind speed, and creates
+a comprehensive visualization. Results are exported in awesIO format.
 """
 
 import sys
@@ -21,8 +22,8 @@ def print_summary(model: PowerModel, data: dict) -> None:
     """Print summary of the power curve calculation.
 
     Args:
-        model (PowerModel): The power model instance.
-        data (dict): Dictionary with all power curve data arrays.
+        model: The power model instance.
+        data: Dictionary with all power curve data arrays.
     """
     power = data['power']
     windSpeed = data['windSpeed']
@@ -51,17 +52,27 @@ def print_summary(model: PowerModel, data: dict) -> None:
 
 def main():
     """Main entry point for power curve calculation script."""
-    # Fixed configuration
-    configPath = workspace_root / 'data' / '100kW_system_example.yml'
+    # Use awesIO format configuration files
+    systemConfigPath = workspace_root / 'data' / 'soft_kite_pumping_ground_gen_system.yml'
+    simulationSettingsPath = workspace_root / 'data' / 'simulation_settings_config.yml'
 
-    if not configPath.exists():
-        print(f"Error: Config file not found: {configPath}")
+    if not systemConfigPath.exists():
+        print(f"Error: System config file not found: {systemConfigPath}")
         sys.exit(1)
 
-    print(f"Loading configuration from: {configPath}")
+    if not simulationSettingsPath.exists():
+        print(f"Error: Simulation settings file not found: {simulationSettingsPath}")
+        sys.exit(1)
 
-    # Load power model
-    model = PowerModel.from_yaml(configPath)
+    print(f"Loading system configuration from: {systemConfigPath}")
+    print(f"Loading simulation settings from: {simulationSettingsPath}")
+
+    # Load power model with awesIO validation
+    model = PowerModel.from_yaml(
+        systemConfigPath,
+        simulationSettingsPath=simulationSettingsPath,
+        validate=True
+    )
 
     # Generate power curve with 500 points
     print(f"\nCalculating power curve (500 points)...")
@@ -70,12 +81,29 @@ def main():
     # Print summary
     print_summary(model, data)
 
+    # Export power curves in awesIO format
+    output_path = workspace_root / 'results' / 'luchsinger_power_curves.yml'
+    print(f"\nExporting power curves to: {output_path}")
+    model.export_power_curves_awesio(
+        data=data,
+        output_path=output_path,
+        name="Luchsinger Model Power Curves",
+        description="Power curves for 100kW soft kite pumping ground-gen AWE system",
+        note="Generated using Luchsinger pumping cycle model",
+    )
+
     # Extract model parameters
     model_params = extract_model_params(model)
 
     # Create comprehensive plot with energy subplot
     print("\nGenerating comprehensive analysis plots...")
-    plot_comprehensive_analysis(data, model_params, save_path="results/power_curve_analysis.png", show=False)
+    plot_comprehensive_analysis(
+        data,
+        model_params,
+        save_path="results/power_curve_analysis.png",
+        show=False
+    )
+    print("Plots saved to: results/power_curve_analysis.png")
 
 
 if __name__ == '__main__':
